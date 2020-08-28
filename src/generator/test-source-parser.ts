@@ -16,6 +16,7 @@ export interface InlineClass {
 
 export interface TestDocs {
     importStatements: { value: string, path: string }[];
+    declaredVariables: any;
     moduleSetup: any;
     includeTestForComponent: string;
     includesComponents?: string[];
@@ -254,9 +255,16 @@ export class TestSourceParser {
         return httpExpressions;
     }
 
+    private getTestDeclaredVariables(childNode: ts.Node): Array<string> {
+        return this.getVariableDeclarationsDetails(childNode).map( ({value: variableDeclaration})=> {
+            return variableDeclaration;
+        }).filter( variables => variables);
+    }
+
     private getTestSourceDetails(node: ts.Node, fileName: string, classesWithDocs: SourceDocs[], otherClasses: SourceDocs[]) {
         let details: TestDocs = {
             importStatements: [],
+            declaredVariables: [],
             moduleSetup: {},
             includeTestForComponent: null,
             inlineClasses: [],
@@ -317,6 +325,12 @@ export class TestSourceParser {
                 details.inlineClasses.push(this.getInlineClass((childNode as ts.ClassDeclaration), fileName));
             } else if (childNode.kind === ts.SyntaxKind.CallExpression) {
                 if (this.isExampleComment(childNode) && bootstrapComponent) {
+
+                    const declaredVariablesInExample = this.getTestDeclaredVariables(childNode);
+                    if(declaredVariablesInExample.length >= 1) {
+                        details.declaredVariables.push(declaredVariablesInExample);
+                    }
+                    
                     const example = {
                         componentProperties: null,
                         httpRequests: this.getExampleHttpRequests(childNode),
@@ -346,20 +360,8 @@ export class TestSourceParser {
 
                     if(docs.length > 0) {
                         docs.filter((doc) => doc.name === 'uijar').forEach((doc) => {
-                            // TestBed.configureTestingModule({ imports: [] ... }) or other function with first argument with TestModuleMetadata
-                            let testModuleDefinitionNode: ts.Node = (childNode as ts.CallExpression).arguments[0];
-
-                            if (testModuleDefinitionNode) {                            
-                                if (testModuleDefinitionNode.kind === ts.SyntaxKind.Identifier) {
-                                    const nodeSymbol = this.checker.getSymbolAtLocation(testModuleDefinitionNode);
-
-                                    if(nodeSymbol) {
-                                        testModuleDefinitionNode = nodeSymbol.valueDeclaration;
-                                    }
-                                }
-
-                                details.moduleSetup = this.getModuleDefinitionDetails(testModuleDefinitionNode);
-                            }
+                            // TestBed.configureTestingModule({ imports: [] ... }) or other function with TestModuleMetadata argument
+                            details.moduleSetup = this.getModuleDefinitionDetails(this.getTestModuleMetadataNode(childNode));
                         });
 
                         parseUIJarJsDocs(docs);
@@ -381,6 +383,40 @@ export class TestSourceParser {
         details.inlineFunctions = inlineFunctions.map((inlineFunction) => inlineFunction.func);
 
         return details;
+    }
+
+    private getTestModuleMetadataNode(childNode: ts.Node): ts.Node {
+        let metadataNode = childNode;
+
+        const getTestModuleMetadata = (currentNode: ts.Node) => {
+            if (currentNode.kind === ts.SyntaxKind.CallExpression) {
+                this.checker.getResolvedSignature((currentNode as ts.CallExpression)).getParameters().forEach((parameterSymbol, index) => {
+                    const variableType = this.checker.typeToString(this.checker.getTypeOfSymbolAtLocation(parameterSymbol, parameterSymbol.valueDeclaration));
+
+                    if (variableType === 'TestModuleMetadata') {
+                        let testModuleDefinitionNode: ts.Node = (currentNode as ts.CallExpression).arguments[index];
+
+                        if (testModuleDefinitionNode) {
+                            if (testModuleDefinitionNode.kind === ts.SyntaxKind.Identifier) {
+                                const nodeSymbol = this.checker.getSymbolAtLocation(testModuleDefinitionNode);
+
+                                if(nodeSymbol) {
+                                    testModuleDefinitionNode = nodeSymbol.valueDeclaration;
+                                }
+                            }
+
+                            metadataNode = testModuleDefinitionNode;
+                        }
+                    }
+                });
+            }
+
+            ts.forEachChild(currentNode, getTestModuleMetadata);
+        };
+
+        getTestModuleMetadata(childNode);
+
+        return metadataNode;
     }
 
     private getVariableDeclarationsDetails(node: ts.Node): VariableDeclaration[] {
@@ -405,7 +441,7 @@ export class TestSourceParser {
         };
 
         traverseChild(node);
-
+        
         return variableDeclarations;
     }
 
